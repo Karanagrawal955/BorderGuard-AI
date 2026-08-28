@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual env
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project outputs (regenerable)
+outputs/*
+!outputs/.gitkeep
+
+# Models (large files)
+models/*.pkl
+models/*.pth
+models/*.pt
+!models/.gitkeep
+
+# Data (large files, use Git LFS or .gitkeep)
+data/genuine/*
+data/tampered/*
+!data/genuine/.gitkeep
+!data/tampered/.gitkeep
+
+# Other project folders (not part of this repo)
+alpaca-trading-agent/
+fitjourney-app/
+fitjourney-site/
+semicon-hackathon/
+stitch_unified_fitness_dashboard/
+stitch_unified_fitness_dashboard.zip
+project.zip
