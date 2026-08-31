@@ -3,9 +3,6 @@ numpy
 opencv-python
 Pillow
 scikit-learn
-
-# === Needed tonight, on a machine WITH internet access ===
-# Install these, then follow SETUP_TRUFOR.md to download pretrained weights.
-torch>=2.0
-torchvision
+torch==2.2.0
+torchvision==0.17.0
 easyocr
