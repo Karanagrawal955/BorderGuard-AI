@@ -59,7 +59,15 @@ def run_pipeline(image_path: str, output_dir: str = "outputs", run_ocr: bool = T
     detection = detector.detect(preprocessed["original"])
     heatmap = detection["heatmap"]
     print(f"  => Heatmap mean: {np.mean(heatmap):.4f}")
-    print(f"  => Confidence: {detection['confidence']:.4f}")
+    if detection.get('score') is not None:
+        print(f"  => TruFor score: {detection['score']:.4f}")
+    if detection.get('confidence') is not None:
+        conf = detection['confidence']
+        if hasattr(conf, 'mean'):
+            conf_mean = float(conf.mean())
+        else:
+            conf_mean = float(conf)
+        print(f"  => Confidence: {conf_mean:.4f}")
 
     # Generate and save heatmap overlay
     overlay = detector.get_heatmap_overlay(preprocessed["original"], heatmap)

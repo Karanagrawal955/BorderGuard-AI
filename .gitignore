@@ -13,35 +13,29 @@ venv/
 env/
 
 # IDE
-.vscode/
+.vscode/settings.json
 .idea/
 *.swp
 
 # OS
 .DS_Store
 Thumbs.db
+desktop.ini
 
 # Project outputs (regenerable)
 outputs/*
 !outputs/.gitkeep
 
-# Models (large files)
+# Models (large files, regenerated locally)
 models/*.pkl
 models/*.pth
 models/*.pt
+models/training_metadata.json
 !models/.gitkeep
 
-# Data (large files, use Git LFS or .gitkeep)
-data/genuine/*
-data/tampered/*
+# Sample data placeholders
 !data/genuine/.gitkeep
 !data/tampered/.gitkeep
 
-# Other project folders (not part of this repo)
-alpaca-trading-agent/
-fitjourney-app/
-fitjourney-site/
-semicon-hackathon/
-stitch_unified_fitness_dashboard/
-stitch_unified_fitness_dashboard.zip
-project.zip
+# TruFor third-party code (cloned fresh, not vendored)
+third_party/TruFor/
