@@ -188,15 +188,15 @@ class AdaptiveClassifier:
         y = np.array(labels)
 
         # Fit or update the classifier
-        if self.is_trained and hasattr(self.pipeline.named_steps["clf"], "coef_"):
-            # Incremental update with partial_fit
-            self.pipeline.named_steps["clf"].partial_fit(X, y)
-            print("[AdaptiveClassifier] Incremental update applied")
-        else:
-            # Full fit
-            self.pipeline.fit(X, y)
-            self.is_trained = True
-            print("[AdaptiveClassifier] Full training completed")
+        # Always do a full re-fit. With a dataset this small (tens of images,
+        # not thousands), incremental partial_fit() offers no real benefit and
+        # has a real risk: calling partial_fit() on the raw classifier bypasses
+        # the pipeline's StandardScaler step entirely, causing a train/predict
+        # scale mismatch since predict() always goes through the full scaled
+        # pipeline. A full re-fit is fast at this scale and avoids that bug.
+        self.pipeline.fit(X, y)
+        self.is_trained = True
+        print("[AdaptiveClassifier] Full training completed")
 
         # Save
         self._save_model()
