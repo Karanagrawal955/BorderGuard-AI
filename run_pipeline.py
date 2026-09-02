@@ -49,8 +49,8 @@ def run_pipeline(image_path: str, output_dir: str = "outputs", run_ocr: bool = T
     # ── Step 1: Preprocessing ──
     print("\n[1/5] Preprocessing image...")
     preprocessed = preprocess_image(image_path)
-    print(f"  → Image loaded: {preprocessed['original'].shape[1]}x{preprocessed['original'].shape[0]}")
-    print(f"  → ELA mean: {preprocessed['ela_stats']['mean']:.2f}, "
+    print(f"  => Image loaded: {preprocessed['original'].shape[1]}x{preprocessed['original'].shape[0]}")
+    print(f"  => ELA mean: {preprocessed['ela_stats']['mean']:.2f}, "
           f"hotspots: {preprocessed['ela_stats']['hotspot_count']}")
 
     # ── Step 2: TruFor Detection ──
@@ -58,14 +58,14 @@ def run_pipeline(image_path: str, output_dir: str = "outputs", run_ocr: bool = T
     detector = TruForDetector()
     detection = detector.detect(preprocessed["original"])
     heatmap = detection["heatmap"]
-    print(f"  → Heatmap mean: {np.mean(heatmap):.4f}")
-    print(f"  → Confidence: {detection['confidence']:.4f}")
+    print(f"  => Heatmap mean: {np.mean(heatmap):.4f}")
+    print(f"  => Confidence: {detection['confidence']:.4f}")
 
     # Generate and save heatmap overlay
     overlay = detector.get_heatmap_overlay(preprocessed["original"], heatmap)
     heatmap_path = output_path / "heatmap_overlay.png"
     cv2.imwrite(str(heatmap_path), overlay)
-    print(f"  → Heatmap overlay saved: {heatmap_path}")
+    print(f"  => Heatmap overlay saved: {heatmap_path}")
 
     # Also save raw heatmap as grayscale
     raw_heatmap_path = output_path / "raw_heatmap.png"
@@ -81,8 +81,8 @@ def run_pipeline(image_path: str, output_dir: str = "outputs", run_ocr: bool = T
         preprocessed["ela_stats"],
     )
     features = features_result["features"]
-    print(f"  → Feature vector: {features.shape[0]} dimensions")
-    print(f"  → Top features:")
+    print(f"  => Feature vector: {features.shape[0]} dimensions")
+    print(f"  => Top features:")
     for name, val in zip(features_result["feature_names"][:5], features[:5]):
         print(f"    {name}: {val:.4f}")
 
@@ -95,16 +95,16 @@ def run_pipeline(image_path: str, output_dir: str = "outputs", run_ocr: bool = T
         ocr_result = ocr_processor.process(preprocessed["original"])
 
         if ocr_result.is_readable:
-            print(f"  → Detected {len(ocr_result.text_blocks)} text blocks")
-            print(f"  → Full text preview: {ocr_result.full_text[:100]}...")
+            print(f"  => Detected {len(ocr_result.text_blocks)} text blocks")
+            print(f"  => Full text preview: {ocr_result.full_text[:100]}...")
             if ocr_result.aadhaar_found:
-                print(f"  → Aadhaar number found: {ocr_result.aadhaar_found}")
-                print(f"  → Checksum valid: {ocr_result.checksum_valid}")
+                print(f"  => Aadhaar number found: {ocr_result.aadhaar_found}")
+                print(f"  => Checksum valid: {ocr_result.checksum_valid}")
         else:
-            print("  → OCR could not read document")
+            print("  => OCR could not read document")
 
         if ocr_result.consistency_flags:
-            print(f"  → Flagged {len(ocr_result.consistency_flags)} inconsistency(ies):")
+            print(f"  => Flagged {len(ocr_result.consistency_flags)} inconsistency(ies):")
             for flag in ocr_result.consistency_flags:
                 print(f"    [{flag['status']}] {flag['check']}: {flag['message']}")
     else:
@@ -175,9 +175,9 @@ def train_classifier():
     stats = clf.fit_from_folders("data/genuine", "data/tampered")
 
     print(f"\n  Training complete!")
-    print(f"  → Genuine samples: {stats.get('genuine_count', 0)}")
-    print(f"  → Tampered samples: {stats.get('tampered_count', 0)}")
-    print(f"  → Training time: {stats.get('training_time_sec', 0)}s")
+    print(f"  => Genuine samples: {stats.get('genuine_count', 0)}")
+    print(f"  => Tampered samples: {stats.get('tampered_count', 0)}")
+    print(f"  => Training time: {stats.get('training_time_sec', 0)}s")
     print("="*60 + "\n")
 
 

@@ -85,7 +85,7 @@ class AdaptiveClassifier:
         else:
             self.pipeline = None
             print("[AdaptiveClassifier] WARNING: scikit-learn not available.")
-            print("  → Install with: pip install scikit-learn")
+            print("  => Install with: pip install scikit-learn")
 
         # Try to load existing model
         self._load_model()
@@ -131,20 +131,20 @@ class AdaptiveClassifier:
         genuine_path = Path(genuine_dir)
         tampered_path = Path(tampered_dir)
 
-        # Collect all image paths
+        # Collect all image paths (including subdirectories)
         image_exts = {".jpg", ".jpeg", ".png", ".bmp", ".tiff"}
         genuine_images = [
-            p for p in genuine_path.iterdir()
-            if p.suffix.lower() in image_exts
+            p for p in genuine_path.rglob("*")
+            if p.suffix.lower() in image_exts and p.is_file()
         ] if genuine_path.exists() else []
         tampered_images = [
-            p for p in tampered_path.iterdir()
-            if p.suffix.lower() in image_exts
+            p for p in tampered_path.rglob("*")
+            if p.suffix.lower() in image_exts and p.is_file()
         ] if tampered_path.exists() else []
 
         if not genuine_images and not tampered_images:
             print("[AdaptiveClassifier] No training images found.")
-            print(f"  → Add images to: {genuine_dir}/ and {tampered_dir}/")
+            print(f"  => Add images to: {genuine_dir}/ and {tampered_dir}/")
             return {"genuine": 0, "tampered": 0, "error": "no images"}
 
         print(f"[AdaptiveClassifier] Found {len(genuine_images)} genuine, "

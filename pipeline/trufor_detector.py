@@ -137,7 +137,7 @@ class TruForDetector:
                 print(f"[TruForDetector] Could not load weights: {e}")
         else:
             print("[TruForDetector] No pretrained weights found — using random init")
-            print(f"  → Place TruFor weights at: {weight_path.resolve()}")
+            print(f"  => Place TruFor weights at: {weight_path.resolve()}")
 
     @torch.no_grad()
     def detect(self, image_bgr: np.ndarray) -> dict:

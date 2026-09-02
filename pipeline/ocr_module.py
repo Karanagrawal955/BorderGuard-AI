@@ -125,7 +125,7 @@ class OCRProcessor:
             print("[OCRProcessor] EasyOCR initialized successfully")
         except ImportError:
             print("[OCRProcessor] WARNING: EasyOCR not installed. OCR will return empty.")
-            print("  → Install with: pip install easyocr")
+            print("  => Install with: pip install easyocr")
         except Exception as e:
             print(f"[OCRProcessor] WARNING: EasyOCR init failed: {e}")
 
