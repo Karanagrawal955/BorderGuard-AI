@@ -23,7 +23,7 @@ import numpy as np
 
 # Classifier imports
 try:
-    from sklearn.linear_model import SGDClassifier
+    from sklearn.ensemble import RandomForestClassifier
     from sklearn.preprocessing import StandardScaler
     from sklearn.pipeline import Pipeline
     SKLEARN_AVAILABLE = True
@@ -34,7 +34,7 @@ import joblib
 
 
 # Feature dimensionality (must match feature_extraction.py output)
-FEATURE_DIM = 15
+FEATURE_DIM = 19
 
 
 class AdaptiveClassifier:
@@ -72,14 +72,13 @@ class AdaptiveClassifier:
         if SKLEARN_AVAILABLE:
             self.pipeline = Pipeline([
                 ("scaler", StandardScaler()),
-                ("clf", SGDClassifier(
-                    loss="log_loss",      # Logistic regression
-                    penalty="l2",
-                    alpha=0.01,           # Regularization
-                    max_iter=100,
-                    tol=1e-3,
+                ("clf", RandomForestClassifier(
+                    n_estimators=100,
+                    max_depth=10,
+                    min_samples_split=3,
+                    min_samples_leaf=2,
                     random_state=42,
-                    warm_start=True,      # Enables incremental learning
+                    class_weight="balanced",
                 )),
             ])
         else:

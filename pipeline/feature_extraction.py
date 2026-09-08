@@ -1,117 +1,128 @@
 """
-feature_extraction.py — Compact feature vectors from TruFor + ELA
+feature_extraction.py — Feature vectors for document tampering detection
 
-Combines:
-    1. TruFor heatmap statistics (mean, std, max, hotspot ratio)
-    2. ELA statistics (mean, variance, hotspot count, hotspot ratio)
-    3. Texture features (Laplacian variance — blurriness indicator)
-    4. JPEG compression artifacts (DCT-based quality estimate)
-
-Output: A fixed-length feature vector per image, suitable for the
-lightweight classifier head.
+Uses only features that actually discriminate genuine from tampered documents:
+1. Heatmap statistics (from trufor_detector)
+2. Spatial ELA distribution (quadrant analysis)
+3. Multi-quality ELA ratio
+4. Noise consistency
+5. Texture analysis
+6. JPEG compression artifacts
+7. Color channel consistency
 """
 
-from typing import Dict, Optional
+from typing import Dict
 
 import cv2
 import numpy as np
-import torch
 
 
-def _trufor_features(heatmap: np.ndarray) -> np.ndarray:
-    """
-    Extract statistics from the TruFor manipulation heatmap.
-
-    Features (5):
-        - mean: average tampering probability
-        - std: spread of tampering scores
-        - max: peak tampering value
-        - hotspot_ratio: fraction of pixels > 0.5 (likely tampered)
-        - peak_concentration: how concentrated the hotspots are
-    """
+def _heatmap_features(heatmap: np.ndarray) -> np.ndarray:
+    """Features from the tamper heatmap (3 features)."""
     hmean = float(np.mean(heatmap))
     hstd = float(np.std(heatmap))
-    hmax = float(np.max(heatmap))
-
     hotspot_ratio = float(np.mean(heatmap > 0.5))
-
-    # Peak concentration: ratio of mean in hot regions vs global mean
-    hot_pixels = heatmap[heatmap > 0.5]
-    if len(hot_pixels) > 0 and hmean > 0:
-        peak_concentration = float(np.mean(hot_pixels)) / hmean
-    else:
-        peak_concentration = 0.0
-
-    return np.array([hmean, hstd, hmax, hotspot_ratio, peak_concentration], dtype=np.float32)
+    return np.array([hmean, hstd, hotspot_ratio], dtype=np.float32)
 
 
-def _ela_features(ela_map: np.ndarray, ela_stats: Dict) -> np.ndarray:
-    """
-    Extract features from the ELA residual map.
-
-    Features (5):
-        - mean: average error level (higher → more re-compression or tampering)
-        - variance: spread of error levels
-        - hotspot_ratio: fraction of high-error pixels
-        - max_error: peak residual
-        - edge_density: ELA residuals concentrated at edges (normal) vs scattered (suspicious)
-    """
+def _ela_spatial_features(ela_map: np.ndarray) -> np.ndarray:
+    """Spatial ELA distribution (4 features)."""
     ela_float = ela_map.astype(np.float32)
+    h, w = ela_float.shape
 
-    mean_val = ela_stats.get("mean", float(np.mean(ela_float)))
-    var_val = ela_stats.get("variance", float(np.var(ela_float)))
-    max_val = ela_stats.get("max_error", float(np.max(ela_float)))
-    hotspot_ratio = ela_stats.get("hotspot_ratio", 0.0)
+    # Quadrant analysis
+    q_tl = np.mean(ela_float[:h//2, :w//2])
+    q_tr = np.mean(ela_float[:h//2, w//2:])
+    q_bl = np.mean(ela_float[h//2:, :w//2])
+    q_br = np.mean(ela_float[h//2:, w//2:])
+    quadrants = np.array([q_tl, q_tr, q_bl, q_br])
 
-    # Edge density: apply Canny edge detection to ELA map
-    ela_uint8 = np.clip(ela_float * (255.0 / max(ela_float.max(), 1e-6)), 0, 255).astype(np.uint8)
-    edges = cv2.Canny(ela_uint8, 50, 150)
-    edge_density = float(np.mean(edges > 0))
+    asymmetry = float(np.std(quadrants) / (np.mean(quadrants) + 1e-6))
+    concentration = float(np.max(quadrants) / (np.min(quadrants) + 1e-6))
 
-    return np.array([mean_val, var_val, hotspot_ratio, max_val, edge_density], dtype=np.float32)
+    # Center vs border
+    center = ela_float[h//4:3*h//4, w//4:3*w//4]
+    border_mask = np.ones_like(ela_float)
+    border_mask[h//4:3*h//4, w//4:3*w//4] = 0
+    border = ela_float[border_mask > 0]
+    center_mean = float(np.mean(center)) if center.size > 0 else 0
+    border_mean = float(np.mean(border)) if border.size > 0 else 0
+    center_border_ratio = center_mean / (border_mean + 1e-6)
+
+    return np.array([asymmetry, concentration, center_border_ratio, center_mean], dtype=np.float32)
+
+
+def _multi_quality_ela_features(image_bgr: np.ndarray) -> np.ndarray:
+    """Compare ELA at different JPEG quality levels (3 features)."""
+    small = cv2.resize(image_bgr, (256, 256), interpolation=cv2.INTER_LANCZOS4)
+
+    _, enc50 = cv2.imencode(".jpg", small, [int(cv2.IMWRITE_JPEG_QUALITY), 50])
+    resaved50 = cv2.imdecode(enc50, cv2.IMREAD_COLOR)
+    diff50 = cv2.cvtColor(cv2.absdiff(small, resaved50), cv2.COLOR_BGR2GRAY).astype(np.float32)
+
+    _, enc95 = cv2.imencode(".jpg", small, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+    resaved95 = cv2.imdecode(enc95, cv2.IMREAD_COLOR)
+    diff95 = cv2.cvtColor(cv2.absdiff(small, resaved95), cv2.COLOR_BGR2GRAY).astype(np.float32)
+
+    ratio = np.where(diff95 > 1, diff50 / (diff95 + 1e-6), 0)
+    ratio_mean = float(np.mean(ratio))
+    ratio_std = float(np.std(ratio))
+    ela_combined = float(np.mean(diff50)) / 255.0
+
+    return np.array([ratio_mean, ratio_std, ela_combined], dtype=np.float32)
+
+
+def _noise_features(image_bgr: np.ndarray) -> np.ndarray:
+    """Noise analysis (3 features)."""
+    gray_u8 = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+    gray_f = gray_u8.astype(np.float32)
+
+    laplacian = cv2.Laplacian(gray_u8, cv2.CV_64F)
+    noise_estimate = float(np.median(np.abs(laplacian)))
+
+    high_freq = cv2.GaussianBlur(gray_f, (5, 5), 1)
+    hf_diff = gray_f - high_freq
+    signal = float(np.mean(np.abs(gray_f)))
+    noise = float(np.std(hf_diff))
+    snr = signal / (noise + 1e-6)
+
+    b, g, r = cv2.split(image_bgr)
+    noise_b = float(np.std(cv2.Laplacian(b, cv2.CV_64F)))
+    noise_g = float(np.std(cv2.Laplacian(g, cv2.CV_64F)))
+    noise_r = float(np.std(cv2.Laplacian(r, cv2.CV_64F)))
+    noise_inconsistency = float(max(noise_b, noise_g, noise_r) - min(noise_b, noise_g, noise_r))
+
+    return np.array([noise_estimate, snr, noise_inconsistency], dtype=np.float32)
 
 
 def _texture_features(image_bgr: np.ndarray) -> np.ndarray:
-    """
-    Extract texture/quality features from the original image.
-
-    Features (3):
-        - laplacian_var: blur detection (low = blurry, high = sharp)
-        - saturation_mean: color saturation (forged regions sometimes have different saturation)
-        - gradient_magnitude: edge strength indicator
-    """
+    """Texture features (4 features)."""
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
-
-    # Laplacian variance (blur detection)
     laplacian = cv2.Laplacian(gray, cv2.CV_64F)
     lap_var = float(np.var(laplacian))
 
-    # Mean saturation
     hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
     sat_mean = float(np.mean(hsv[:, :, 1]))
 
-    # Gradient magnitude (Sobel)
     gx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
     gy = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
     grad_mag = float(np.mean(np.sqrt(gx**2 + gy**2)))
 
-    return np.array([lap_var, sat_mean, grad_mag], dtype=np.float32)
+    # Local texture richness
+    kernel = np.ones((5, 5), np.float32) / 25
+    local_mean = cv2.filter2D(gray.astype(np.float32), -1, kernel)
+    local_sq_mean = cv2.filter2D((gray.astype(np.float32))**2, -1, kernel)
+    local_std = np.sqrt(np.maximum(local_sq_mean - local_mean**2, 0))
+    texture_richness = float(np.mean(local_std))
+
+    return np.array([lap_var, sat_mean, grad_mag, texture_richness], dtype=np.float32)
 
 
 def _compression_features(image_bgr: np.ndarray) -> np.ndarray:
-    """
-    Estimate JPEG compression characteristics.
-
-    Features (2):
-        - estimated_quality: rough estimate based on DCT statistics
-        - block_artifact_score: visible 8×8 block boundaries (indicates heavy re-compression)
-    """
+    """JPEG compression analysis (2 features)."""
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
-
-    # Rough quality estimate via DCT energy ratio
-    # High-quality JPEGs preserve more high-frequency DCT coefficients
     small = cv2.resize(gray, (128, 128))
-    # Block-level variance (8×8 blocks)
+
     blocks = []
     for i in range(0, 128, 8):
         for j in range(0, 128, 8):
@@ -119,14 +130,10 @@ def _compression_features(image_bgr: np.ndarray) -> np.ndarray:
             blocks.append(np.var(block))
     block_var = np.mean(blocks) if blocks else 0.0
 
-    # Block artifact: detect periodic pattern at 8-pixel intervals
-    # This catches obvious JPEG re-compression artifacts
     diff_h = np.abs(gray[:, 1:] - gray[:, :-1])
-    # Sample rows at 8-pixel intervals and check for increased differences
     periodic_score = 0.0
     for offset in range(0, min(gray.shape[0], 64), 8):
-        row_diff = np.mean(diff_h[offset, :])
-        periodic_score += row_diff
+        periodic_score += np.mean(diff_h[offset, :])
     periodic_score /= max(1, 64 // 8)
 
     return np.array([block_var, periodic_score], dtype=np.float32)
@@ -139,35 +146,29 @@ def extract_features(
     ela_stats: Dict,
 ) -> dict:
     """
-    Extract the complete feature vector for one image.
-
-    Args:
-        image_bgr : BGR numpy array (original image, any size)
-        heatmap   : TruFor manipulation heatmap (H, W)
-        ela_map   : ELA residual map (H, W)
-        ela_stats : ELA statistics dict from preprocessing
-
-    Returns dict with:
-        features   : (15,) float32 numpy array — the combined feature vector
-        feature_names : list of feature names for interpretability
+    Extract complete feature vector for one image.
+    Returns dict with features (19,) and feature_names.
     """
-    feat_trufor = _trufor_features(heatmap)
-    feat_ela = _ela_features(ela_map, ela_stats)
+    feat_hm = _heatmap_features(heatmap)
+    feat_ela_spatial = _ela_spatial_features(ela_map)
+    feat_mq_ela = _multi_quality_ela_features(image_bgr)
+    feat_noise = _noise_features(image_bgr)
     feat_texture = _texture_features(image_bgr)
     feat_compression = _compression_features(image_bgr)
 
-    features = np.concatenate([feat_trufor, feat_ela, feat_texture, feat_compression])
+    features = np.concatenate([
+        feat_hm, feat_ela_spatial, feat_mq_ela,
+        feat_noise, feat_texture, feat_compression,
+    ])
 
     feature_names = [
-        # TruFor features (5)
-        "trufor_mean", "trufor_std", "trufor_max",
-        "trufor_hotspot_ratio", "trufor_peak_concentration",
-        # ELA features (5)
-        "ela_mean", "ela_variance", "ela_hotspot_ratio",
-        "ela_max_error", "ela_edge_density",
-        # Texture features (3)
-        "texture_laplacian_var", "texture_saturation", "texture_gradient_mag",
-        # Compression features (2)
+        "heatmap_mean", "heatmap_std", "heatmap_hotspot_ratio",
+        "ela_spatial_asymmetry", "ela_spatial_concentration",
+        "ela_spatial_center_border", "ela_spatial_center_mean",
+        "mq_ela_ratio_mean", "mq_ela_ratio_std", "mq_ela_combined",
+        "noise_estimate", "noise_snr", "noise_inconsistency",
+        "texture_laplacian_var", "texture_saturation",
+        "texture_gradient_mag", "texture_richness",
         "compression_block_var", "compression_periodic_score",
     ]
 

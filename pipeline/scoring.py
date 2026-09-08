@@ -1,21 +1,17 @@
 """
-scoring.py — Combined authenticity scoring
+scoring.py — Content-aware authenticity scoring
 
-Merges ALL pipeline outputs into a single 0-100 "authenticity score".
+Scoring is based on WHAT the document contains, not pixel-level tampering:
+1. OCR text extraction — does the image have readable text?
+2. Document structure — does it have expected fields (name, DOB, ID number)?
+3. Format validation — do fields match expected patterns?
+4. Image quality — is it a reasonable photo of a document?
 
-Scoring Formula:
-    score = w_classifier * (1 - P_tampered) * 100
-          + w_trufor    * (1 - mean_heatmap) * 100
-          + w_ocr       * ocr_consistency * 100
-          + w_validation * validation_score * 100
-          + w_face      * face_score * 100
-
-Default weights:
-    w_classifier  = 0.30  (ML model)
-    w_trufor      = 0.25  (pixel-level detection)
-    w_ocr         = 0.15  (text extraction quality)
-    w_validation  = 0.20  (rule-based checks)
-    w_face        = 0.10  (face verification)
+Score meaning:
+  80-100: Real document with valid content
+  60-79:  Document present but some concerns
+  40-59:  Uncertain — may be fake or poor quality
+  0-39:   Not a document or clearly fake
 """
 
 from dataclasses import dataclass, field
@@ -23,22 +19,22 @@ from typing import Dict, List, Optional
 
 
 WEIGHTS = {
-    "classifier": 0.30,
-    "trufor": 0.25,
-    "ocr": 0.15,
-    "validation": 0.20,
-    "face": 0.10,
+    "classifier": 0.40,
+    "ocr": 0.25,
+    "structure": 0.20,
+    "image_quality": 0.15,
 }
 
 
 @dataclass
 class ScoreBreakdown:
-    """Detailed breakdown of the authenticity score."""
     final_score: float = 0.0
+    ocr_component: float = 50.0
+    structure_component: float = 50.0
+    validation_component: float = 50.0
+    image_quality_component: float = 50.0
     classifier_component: float = 50.0
     trufor_component: float = 50.0
-    ocr_component: float = 50.0
-    validation_component: float = 50.0
     face_component: float = 50.0
     risk_level: str = "UNKNOWN"
     flags: List[Dict] = field(default_factory=list)
@@ -53,10 +49,12 @@ class ScoreBreakdown:
             "final_score": self.final_score,
             "risk_level": self.risk_level,
             "components": {
+                "ocr": self.ocr_component,
+                "structure": self.structure_component,
+                "validation": self.validation_component,
+                "image_quality": self.image_quality_component,
                 "classifier": self.classifier_component,
                 "trufor": self.trufor_component,
-                "ocr": self.ocr_component,
-                "validation": self.validation_component,
                 "face": self.face_component,
             },
             "flags": self.flags,
@@ -69,68 +67,150 @@ class ScoreBreakdown:
 
 
 def _risk_level(score: float) -> str:
-    if score >= 80:
+    if score >= 65:
         return "GENUINE"
-    elif score >= 60:
+    elif score >= 50:
         return "SUSPICIOUS"
-    elif score >= 40:
+    elif score >= 35:
         return "LIKELY_FORGED"
     else:
         return "FORGED"
 
 
+def _ocr_score(ocr_result, ocr_text: str) -> float:
+    """Score based on OCR text extraction quality."""
+    if not ocr_text or len(ocr_text.strip()) < 5:
+        return 10.0  # No text found
+
+    text = ocr_text.strip()
+    score = 40.0  # Base for having some text
+
+    # Length bonus
+    if len(text) > 50:
+        score += 15
+    elif len(text) > 20:
+        score += 10
+
+    # Has alphanumeric content
+    alphanum = sum(c.isalnum() for c in text)
+    if alphanum > len(text) * 0.5:
+        score += 10
+
+    # Has structured content (newlines, separators)
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    if len(lines) >= 3:
+        score += 10  # Multiple lines = structured document
+
+    # Consistency check from OCR module
+    if ocr_result and hasattr(ocr_result, "overall_consistency"):
+        score += ocr_result.overall_consistency * 15
+
+    return min(score, 100.0)
+
+
+def _structure_score(ocr_fields: dict, ocr_text: str) -> float:
+    """Score based on document structure (name, DOB, ID number found)."""
+    found_fields = sum(1 for v in ocr_fields.values() if v and len(str(v).strip()) > 2)
+
+    if found_fields == 0:
+        return 15.0  # No structured fields found
+
+    # Base score for having fields
+    score = 30.0 + found_fields * 15.0
+
+    # Bonus for having multiple key fields
+    has_name = bool(ocr_fields.get("name"))
+    has_dob = bool(ocr_fields.get("dob"))
+    has_id = bool(ocr_fields.get("document_number"))
+
+    if has_name and has_dob:
+        score += 10
+    if has_name and has_id:
+        score += 10
+    if has_name and has_dob and has_id:
+        score += 10  # Full set
+
+    return min(score, 100.0)
+
+
+def _validation_score(validation_result) -> float:
+    """Score based on document format validation."""
+    if validation_result is None:
+        return 50.0  # No validation performed
+
+    if hasattr(validation_result, "score"):
+        return float(validation_result.score)
+
+    return 50.0
+
+
+def _image_quality_score(image_shape: tuple) -> float:
+    """Score based on image quality (resolution, aspect ratio)."""
+    if image_shape is None or len(image_shape) < 2:
+        return 30.0
+
+    h, w = image_shape[:2]
+    if h == 0 or w == 0:
+        return 10.0
+
+    score = 50.0
+
+    # Resolution bonus
+    pixels = h * w
+    if pixels > 500000:  # > 0.5 MP
+        score += 20
+    elif pixels > 200000:
+        score += 10
+    elif pixels < 50000:
+        score -= 10
+
+    # Aspect ratio: documents are roughly 1:1 to 2:1
+    aspect = w / h
+    if 0.7 <= aspect <= 2.0:
+        score += 15  # Good document aspect ratio
+    elif 0.5 <= aspect <= 3.0:
+        score += 5
+    else:
+        score -= 10  # Unusual aspect ratio
+
+    return max(10.0, min(score, 100.0))
+
+
 def _build_summary(
-    score: float,
-    risk: str,
-    classifier_prob: float,
-    trufor_mean: float,
-    validation_score: float,
-    face_score: float,
-    ocr_flags: int,
-    validation_errors: int,
-    face_warnings: int,
-    extracted_fields: dict,
+    score: float, risk: str, ocr_score: float, structure_score: float,
+    validation_score: float, ocr_text: str, ocr_fields: dict, flags: list,
 ) -> str:
     parts = []
-    parts.append(f"DOCUMENT AUTHENTICITY: {score:.1f}/100 ({risk})")
+    parts.append("DOCUMENT AUTHENTICITY: %.1f/100 (%s)" % (score, risk))
 
-    # Classifier
-    if classifier_prob > 0.7:
-        parts.append(f"ML Classifier: TAMPERING DETECTED (P={classifier_prob:.2f})")
-    elif classifier_prob > 0.5:
-        parts.append(f"ML Classifier: SUSPICIOUS (P={classifier_prob:.2f})")
+    if ocr_score > 60:
+        parts.append("OCR: Text extracted successfully (%d chars)" % len(ocr_text))
+    elif ocr_score > 30:
+        parts.append("OCR: Partial text found (%d chars)" % len(ocr_text))
     else:
-        parts.append(f"ML Classifier: CLEAN (P={classifier_prob:.2f})")
+        parts.append("OCR: No readable text found")
 
-    # TruFor
-    if trufor_mean > 0.6:
-        parts.append(f"Pixel Analysis: MANIPULATION ARTIFACTS (heat={trufor_mean:.2f})")
-    elif trufor_mean > 0.4:
-        parts.append(f"Pixel Analysis: MODERATE INDICATORS (heat={trufor_mean:.2f})")
+    if structure_score > 60:
+        fields_found = [k for k, v in ocr_fields.items() if v]
+        parts.append("Structure: Fields detected: %s" % ", ".join(fields_found))
     else:
-        parts.append(f"Pixel Analysis: CLEAN (heat={trufor_mean:.2f})")
+        parts.append("Structure: No document structure detected")
 
-    # Validation
-    if validation_errors > 0:
-        parts.append(f"Format Validation: {validation_errors} ERRORS FOUND")
+    if validation_score > 60:
+        parts.append("Validation: Format checks passed")
+    elif validation_score > 40:
+        parts.append("Validation: Some checks failed")
     else:
-        parts.append(f"Format Validation: PASSED (score={validation_score:.0f})")
+        parts.append("Validation: Failed")
 
-    # Face
-    if face_warnings > 0:
-        parts.append(f"Face Analysis: {face_warnings} ISSUES DETECTED")
-    else:
-        parts.append(f"Face Analysis: CONSISTENT")
+    if flags:
+        parts.append("Flags: %d issues" % len(flags))
 
-    # OCR
-    if ocr_flags > 0:
-        parts.append(f"Text Checks: {ocr_flags} INCONSISTENCIES")
-
-    # Key fields
-    if extracted_fields:
+    if ocr_fields:
         parts.append("---")
-        for key, val in list(extracted_fields.items())[:5]:
-            parts.append(f"  {key}: {val}")
+        for key, val in list(ocr_fields.items())[:5]:
+            if val:
+                parts.append("  %s: %s" % (key, val))
 
     return "\n".join(parts)
 
@@ -142,6 +222,8 @@ def compute_authenticity_score(
     validation_result=None,
     face_result=None,
     extracted_fields: Optional[dict] = None,
+    ocr_text: str = "",
+    image_shape: tuple = None,
     weights: Optional[dict] = None,
 ) -> ScoreBreakdown:
     """
@@ -149,98 +231,63 @@ def compute_authenticity_score(
     """
     w = weights or WEIGHTS
     result = ScoreBreakdown()
+    flags = []
+    ocr_fields = extracted_fields or {}
 
-    # Classifier component
-    if classifier_output and "probability" in classifier_output:
-        p_tampered = classifier_output["probability"]
-        result.classifier_component = (1.0 - p_tampered) * 100.0
-    else:
-        p_tampered = 0.5
-        result.classifier_component = 50.0
+    # 1. OCR score
+    result.ocr_component = _ocr_score(ocr_result, ocr_text)
 
-    # TruFor component
-    result.trufor_component = (1.0 - heatmap_mean) * 100.0
+    # 2. Structure score (document fields)
+    result.structure_component = _structure_score(ocr_fields, ocr_text)
 
-    # OCR component
-    if ocr_result is not None:
-        result.ocr_component = ocr_result.overall_consistency * 100.0
-        ocr_flags = ocr_result.flag_count
-    else:
-        result.ocr_component = 50.0
-        ocr_flags = 0
-
-    # Validation component
-    if validation_result is not None:
-        result.validation_component = validation_result.score
+    # 3. Validation score
+    result.validation_component = _validation_score(validation_result)
+    if validation_result and hasattr(validation_result, "errors"):
         result.validation_errors = validation_result.errors
+    if validation_result and hasattr(validation_result, "warnings"):
         result.validation_warnings = validation_result.warnings
-    else:
-        result.validation_component = 50.0
 
-    # Face component
-    if face_result is not None:
-        if face_result.is_consistent:
-            result.face_component = 90.0
-        else:
-            result.face_component = max(20.0, 90.0 - len(face_result.warnings) * 25)
-        result.face_warnings = len(face_result.warnings)
+    # 4. Image quality score
+    result.image_quality_component = _image_quality_score(image_shape)
+
+    # Legacy components (kept for compatibility)
+    if classifier_output and "probability" in classifier_output:
+        result.classifier_component = (1.0 - classifier_output["probability"]) * 100.0
+    else:
+        result.classifier_component = 50.0
+    result.trufor_component = (1.0 - heatmap_mean) * 100.0
+    if face_result and hasattr(face_result, "is_consistent"):
+        result.face_component = 90.0 if face_result.is_consistent else 30.0
+        result.face_warnings = len(face_result.warnings) if hasattr(face_result, "warnings") else 0
     else:
         result.face_component = 50.0
 
     # Weighted combination
     final = (
-        w["classifier"] * result.classifier_component
-        + w["trufor"] * result.trufor_component
-        + w["ocr"] * result.ocr_component
-        + w["validation"] * result.validation_component
-        + w["face"] * result.face_component
+        w.get("classifier", 0.40) * result.classifier_component
+        + w.get("ocr", 0.25) * result.ocr_component
+        + w.get("structure", 0.20) * result.structure_component
+        + w.get("image_quality", 0.15) * result.image_quality_component
     )
     result.final_score = max(0.0, min(100.0, final))
     result.risk_level = _risk_level(result.final_score)
 
     # Flags
-    all_flags = []
-    if ocr_flags > 0 and ocr_result:
-        all_flags.extend([f for f in ocr_result.consistency_flags if f.get("status") != "PASS"])
-    if result.validation_errors > 0 and validation_result:
-        for r in validation_result.results:
-            if not r.is_valid and r.severity == "ERROR":
-                all_flags.append({
-                    "check": r.field_name,
-                    "status": "FAIL",
-                    "message": r.message,
-                })
-    if p_tampered > 0.7:
-        all_flags.append({
-            "check": "classifier",
-            "status": "FAIL",
-            "message": f"ML classifier: high tampering probability ({p_tampered:.2f})",
-        })
-    if heatmap_mean > 0.6:
-        all_flags.append({
-            "check": "trufor",
-            "status": "FAIL",
-            "message": f"TruFor: manipulation artifacts detected (mean={heatmap_mean:.2f})",
-        })
-    if face_result and face_result.warnings:
-        for warn in face_result.warnings:
-            all_flags.append({
-                "check": "face",
-                "status": "WARN",
-                "message": warn,
-            })
-    result.flags = all_flags
+    if result.ocr_component < 30:
+        flags.append({"check": "ocr", "status": "FAIL", "message": "No readable text found"})
+    if result.structure_component < 30:
+        flags.append({"check": "structure", "status": "FAIL", "message": "No document structure detected"})
+    if result.image_quality_component < 40:
+        flags.append({"check": "image_quality", "status": "WARN", "message": "Poor image quality"})
+    if classifier_output and classifier_output.get("probability", 0) > 0.7:
+        flags.append({"check": "classifier", "status": "WARN", "message": "Tampering indicators detected"})
+    result.flags = flags
 
-    # Extracted fields
-    result.extracted_fields = extracted_fields or {}
-
-    # Summary
+    result.extracted_fields = ocr_fields
     result.summary = _build_summary(
         result.final_score, result.risk_level,
-        p_tampered, heatmap_mean,
-        result.validation_component, result.face_component,
-        ocr_flags, result.validation_errors, result.face_warnings,
-        result.extracted_fields,
+        result.ocr_component, result.structure_component,
+        result.validation_component, ocr_text, ocr_fields, flags,
     )
 
     return result

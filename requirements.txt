@@ -6,3 +6,8 @@ joblib
 torch>=2.3.1
 torchvision>=0.18.0
 easyocr
+flask>=3.0
+flask-cors>=4.0
+werkzeug>=3.0
+passporteye
+scikit-image

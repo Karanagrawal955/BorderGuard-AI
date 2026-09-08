@@ -1,0 +1,449 @@
+/*
+
+ * BorderGuard AI visual system: cinematic intelligence platform inspired by the supplied reference.
+
+ * This page orchestrates the R3F scene, scan state machine, and LIVE verification UI with
+
+ * real backend integration for image authenticity screening.
+
+ */
+
+import { useEffect, useMemo, useState } from "react";
+
+import {
+
+  Activity, AlertTriangle, BarChart3, Bell, BookOpenCheck, Boxes, Check, ChevronRight, CircleDot,
+
+  Clock3, Database, FileCheck2, FileScan, Fingerprint, Gauge, Globe2, Home as HomeIcon, LockKeyhole,
+
+  Menu, Network, Radar, ScanFace, Search, Shield, ShieldCheck, Sparkles, UserRoundCheck, Volume2, VolumeX, X,
+
+} from "lucide-react";
+
+import BorderScene from "@/components/three/BorderScene";
+
+import GlobalGlobe from "@/components/three/GlobalGlobe";
+
+import { checkpoints, type Checkpoint } from "@/data/checkpoints";
+
+import { useScanSimulation, type ScanState } from "@/hooks/useScanSimulation";
+
+import { useToast } from "@/components/ui/sonner";
+
+
+
+type Mode = "HOME" | "DOCUMENT_SCAN" | "LIVE_VERIFICATION" | "GLOBAL_INTELLIGENCE" | "RISK_ANALYSIS" | "DATABASE" | "ANALYTICS" | "CASE_RECORDS";
+
+
+
+type NavItem = { label: string; mode: Mode; icon: typeof HomeIcon };
+
+
+
+const menuItems: NavItem[] = [
+
+  { label: "Home", mode: "HOME", icon: HomeIcon },
+
+  { label: "Document Scan", mode: "DOCUMENT_SCAN", icon: FileScan },
+
+  { label: "Live Verification", mode: "LIVE_VERIFICATION", icon: ScanFace },
+
+  { label: "Intelligence Map", mode: "GLOBAL_INTELLIGENCE", icon: Globe2 },
+
+  { label: "Risk Analysis", mode: "RISK_ANALYSIS", icon: AlertTriangle },
+
+  { label: "Database", mode: "DATABASE", icon: Database },
+
+  { label: "Analytics", mode: "ANALYTICS", icon: BarChart3 },
+
+  { label: "Case Records", mode: "CASE_RECORDS", icon: BookOpenCheck },
+
+];
+
+
+
+const processSteps = [
+
+  { number: "01", title: "OCR extraction", detail: "Reading identity data", icon: FileScan, tone: "cyan" },
+
+  { number: "02", title: "Document validation", detail: "Checking official standards", icon: ShieldCheck, tone: "green" },
+
+  { number: "03", title: "Tampering detection", detail: "Inspecting security layers", icon: Search, tone: "amber" },
+
+  { number: "04", title: "Face verification", detail: "Matching identity in real time", icon: ScanFace, tone: "cyan" },
+
+];
+
+
+
+const scanLabels: Record<ScanState, string> = {
+
+  IDLE: "READY FOR DOCUMENT", DOCUMENT_DETECTED: "DOCUMENT DETECTED", OCR_EXTRACTION: "OCR EXTRACTION",
+
+  DOCUMENT_VALIDATION: "DOCUMENT VALIDATION", TAMPERING_ANALYSIS: "TAMPERING ANALYSIS", FACE_VERIFICATION: "FACE VERIFICATION",
+
+  RISK_ANALYSIS: "RISK ANALYSIS", VERIFIED: "IDENTITY VERIFIED",
+
+};
+
+
+
+const riskFactors = [
+
+  ["Document integrity", "98%", "good"], ["Identity match", "98.7%", "good"], ["Expiry status", "VALID", "good"],
+
+  ["Database status", "CLEAR", "good"], ["Travel history", "LOW SIGNAL", "neutral"], ["Anomaly score", "4%", "good"],
+
+];
+
+
+
+const cases = [
+
+  { id: "BG-20481", reason: "Photo manipulation detected", risk: "87", status: "Review required", tone: "high", checkpoint: "T3 Â· New Delhi" },
+
+  { id: "BG-20480", reason: "Identity mismatch", risk: "64", status: "Escalated", tone: "medium", checkpoint: "T2 Â· Mumbai" },
+
+  { id: "BG-20479", reason: "Document expired", risk: "42", status: "Review required", tone: "medium", checkpoint: "T1 Â· Amritsar" },
+
+  { id: "BG-20478", reason: "All checks passed", risk: "08", status: "Verified", tone: "low", checkpoint: "T3 Â· New Delhi" },
+
+];
+
+
+
+function modeTitle(mode: Mode) {
+
+  return { HOME: "Command center", DOCUMENT_SCAN: "Document scan", LIVE_VERIFICATION: "Live verification", GLOBAL_INTELLIGENCE: "Global intelligence", RISK_ANALYSIS: "Risk analysis", DATABASE: "Database validation", ANALYTICS: "Analytics command", CASE_RECORDS: "Case records" }[mode];
+
+}
+
+
+
+interface ScanResult {
+
+  authenticityScore: number;
+
+  isTampered: boolean;
+
+  ocrText: string;
+
+  riskLevel: "Low" | "Medium" | "High";
+
+  decision: "Verify" | "Review";
+
+  status: "complete" | "error";
+
+  source: string;
+
+}
+
+
+
+interface UploadState {
+
+  isScanning: boolean;
+
+  scanResult: ScanResult | null;
+
+  selectedFile: File | null;
+
+}
+
+
+
+export default function Home() {
+
+  const scan = useScanSimulation();
+
+  const [activeMode, setActiveMode] = useState<Mode>(() => {
+
+    const requestedMode = new URLSearchParams(window.location.search).get("mode");
+
+    return requestedMode === "GLOBAL_INTELLIGENCE" ? "GLOBAL_INTELLIGENCE" : "HOME";
+
+  });
+
+  const [mobileNav, setMobileNav] = useState(false);
+
+  const [introVisible, setIntroVisible] = useState(true);
+
+  const [soundOn, setSoundOn] = useState(false);
+
+  const [demoMode, setDemoMode] = useState(true);
+
+  const [forensicMode, setForensicMode] = useState("ORIGINAL");
+
+  const [selectedCase, setSelectedCase] = useState(cases[0]);
+
+  const [selectedCheckpoint, setSelectedCheckpoint] = useState<Checkpoint>(checkpoints[0]);
+
+  const [uploadState, setUploadState] = useState<UploadState>({
+
+    isScanning: false,
+
+    scanResult: null,
+
+    selectedFile: null,
+
+  });
+
+
+
+  const { toast } = useToast();
+
+
+
+  useEffect(() => {
+
+    const timer = window.setTimeout(() => setIntroVisible(false), 1500);
+
+    return () => window.clearTimeout(timer);
+
+  }, []);
+
+
+
+  useEffect(() => {
+
+    const handlePointerMove = (event: PointerEvent) => {
+
+      document.documentElement.style.setProperty("--cursor-x", `${event.clientX}px`);
+
+      document.documentElement.style.setProperty("--cursor-y", `${event.clientY}px`);
+
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+
+    return () => window.removeEventListener("pointermove", handlePointerMove);
+
+  }, []);
+
+
+
+  const currentTime = useMemo(() => new Intl.DateTimeFormat("en-IN", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false, timeZone: "Asia/Kolkata" }).format(new Date()), []);
+
+  const currentLabel = scanLabels[scan.scanState];
+
+
+
+  const enterCommandCenter = () => { setIntroVisible(false); setActiveMode("HOME"); };
+
+  const startDocumentScan = () => { setIntroVisible(false); setActiveMode("DOCUMENT_SCAN"); scan.startScan(); };
+
+  const handleNav = (item: NavItem) => { setActiveMode(item.mode); setMobileNav(false); setShowAlert(true); };
+
+
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+
+    const file = e.target.files?.[0];
+
+    if (file) {
+
+      setUploadState(prev => ({ ...prev, selectedFile: file }));
+
+    }
+
+  };
+
+
+
+  const clearFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
+
+    e.target.value = "";
+
+  };
+
+
+
+  const performScan = async (file: File) => {
+
+    setUploadState(prev => ({ ...prev, isScanning: true, scanResult: null }));
+
+    
+
+    try {
+
+      const formData = new FormData();
+
+      formData.append("document", file);
+
+
+
+      // Send image to Flask backend for analysis
+
+      const response = await fetch("http://localhost:5000/api/analyze-document", {
+
+        method: "POST",
+
+        body: formData,
+
+        headers: {
+
+          // No auth header needed - the backend handles it
+
+        },
+
+      });
+
+
+
+      if (!response.ok) {
+
+        throw new Error(`Backend error: ${response.status}`);
+
+      }
+
+
+
+      const result: ScanResult = await response.json();
+
+      setUploadState(prev => ({ ...prev, isScanning: false, scanResult: result }));
+
+
+
+      // Show success toast
+
+      toast(`${result.decision} - Score: ${result.authenticityScore}/100`, {
+
+        description: result.ocrText ? `OCR: ${result.ocrText.substring(0, 50)}...` : undefined,
+
+        action: result.isTampered ? null : <span>Document authentic</span>,
+
+      });
+
+
+
+    } catch (error: any) {
+
+      console.error("Scan failed:", error);
+
+      toast("Scan failed", {
+
+        variant: "destructive",
+
+        description: error.message || "Unable to connect to backend",
+
+      });
+
+      setUploadState(prev => ({ ...prev, isScanning: false }));
+
+    }
+
+  };
+
+
+
+  const resetUpload = () => {
+
+    setUploadState({
+
+      isScanning: false,
+
+      scanResult: null,
+
+      selectedFile: null,
+
+    });
+
+    clearFileInput(event); // note: event not available here, caller should handle
+
+  };
+
+
+
+  return (
+
+    <main className={`borderguard-shell ${introVisible ? "intro-active" : ""}`}><div className="hud-cursor" aria-hidden="true" />
+
+      <div className="ambient-grid" aria-hidden="true" />
+
+      {introVisible && <section className="intro-screen"><div className="intro-grid" /><div className="intro-point" /><div className="intro-content"><div className="intro-mark"><Shield size={31} /><span /></div><div className="intro-wordmark">BORDER<span>GUARD</span> AI</div><div className="intro-rule" /><p>AI-POWERED IDENTITY & DOCUMENT INTELLIGENCE</p><div className="intro-actions"><button className="hud-button hud-button-primary" onClick={startDocumentScan}><ScanFace size={15} /> Start document scan</button><button className="hud-button" onClick={enterCommandCenter}><Radar size={15} /> Enter command center</button></div><span className="intro-demo">DEMO ENVIRONMENT Â· SIMULATED INTELLIGENCE FEED</span></div></section>}
+
+      <header className="topbar">
+
+        <button className="mobile-menu-button" aria-label="Open navigation" onClick={() => setMobileNav((value) => !value)}>{mobileNav ? <X size={18} /> : <Menu size={18} />}</button>
+
+        <div className="brand-lockup"><div className="brand-mark"><Shield size={24} strokeWidth={1.5} /><span className="brand-node" /></div><div><div className="wordmark">BORDER<span>GUARD</span> AI</div><div className="brand-tagline">Secure borders Â· safer tomorrow</div></div></div>
+
+        <div className="topbar-motto"><span>People move the world</span><strong>We keep it safe</strong></div>
+
+        <div className="ministry-block"><div className="ministry-emblem"><ShieldCheck size={18} /></div><div className="ministry-copy"><strong>Ministry of Home Affairs</strong><span>Demonstration interface</span></div><div className="time-block"><strong>{currentTime}</strong><span>Sat, 06 Sep 2026</span></div></div>
+
+      </header>
+
+
+
+      <aside className={`sidebar ${mobileNav ? "sidebar-open" : ""}`}>
+
+        <div className="sidebar-heading"><span className="live-dot" />CONTROL DESK</div>
+
+        <nav aria-label="Primary navigation">{menuItems.map((item) => { const Icon = item.icon; return <button key={item.mode} className={`nav-item ${activeMode === item.mode ? "nav-item-active" : ""}`} onClick={() => handleNav(item)}><Icon size={17} strokeWidth={1.6} /><span>{item.label}</span>{activeMode === item.mode && <ChevronRight className="nav-chevron" size={14} />}</button>; })}</nav>
+
+        <div className="sidebar-footer"><div className="shield-orbit"><Globe2 size={37} strokeWidth={1.2} /><span /></div><p>Protect people.<br />Preserve possibilities.</p><div className="system-status"><CircleDot size={12} /> All systems operational</div><div className="demo-badge"><LockKeyhole size={12} /> Demo environment</div></div>
+
+      </aside>
+
+
+
+      <section className="workspace">
+
+        <div className="workspace-intro"><div><div className="eyebrow"><span className="eyebrow-line" />{activeMode === "HOME" ? "ACTIVE INSPECTION / 07" : `COMMAND MODE / ${activeMode}`}</div><h1>{modeTitle(activeMode)} <em>{activeMode === "HOME" ? "intelligence" : ""}</em></h1></div><div className="workspace-actions"><button className={`sound-toggle ${soundOn ? "sound-on" : ""}`} aria-label="Toggle sound" onClick={() => setSoundOn((value) => !value)}>{soundOn ? <Volume2 size={16} /> : <VolumeX size={16} />}<span>{soundOn ? "SOUND ON" : "SOUND OFF"}</span></button><button className="icon-button" aria-label="Search cases"><Search size={17} /></button><button className="icon-button notification-button" aria-label="Notifications"><Bell size={17} /><span /></button><button className="operator-avatar" aria-label="Operator profile">AS</button></div></div
+>
+        {activeMode === "HOME" || activeMode === "DOCUMENT_SCAN" || activeMode === "LIVE_VERIFICATION" ? <DashboardMode scan={scan} currentLabel={currentLabel} activeMode={activeMode} startDocumentScan={startDocumentScan} uploadState={uploadState} onFileSelect={handleFileSelect} onResetUpload={resetUpload} /> : activeMode === "GLOBAL_INTELLIGENCE" ? <GlobeMode selectedCheckpoint={selectedCheckpoint} onSelectCheckpoint={setSelectedCheckpoint} /> : <OperationalMode mode={activeMode} forensicMode={forensicMode} setForensicMode={setForensicMode} selectedCase={selectedCase} setSelectedCase={setSelectedCase} />}
+
+      </section>
+
+
+
+      <aside className="evidence-column"><div className="evidence-heading"><div><span className="eyebrow-line" />IDENTITY EVIDENCE</div><span className="case-id">CASE 7F-2048 · DEMO</span></div>
+
+      <section className="identity-card panel-surface">
+
+      <div className="identity-card-top"><span className="verified-label"><span />MATCH</span><Fingerprint size={18} /></div>
+
+      <div className="identity-portrait-row"><div className="portrait-frame"><div className="portrait-placeholder"><UserRoundCheck size={42} strokeWidth={1} /></div><span className="portrait-scanline" /></div>
+
+      <div className="face-match"><div className="face-wire"><ScanFace size={53} strokeWidth={1} /></div><strong>98.7%</strong><span>FACE MATCH</span></div>
+
+      <div className="identity-name"><span>FICTIONAL DEMO IDENTITY</span><strong>AARYAN SHARMA</strong></div>
+
+      <div className="identity-grid"><div><span>Passport no.</span><strong>S7234567</strong></div><div><span>Nationality</span><strong>INDIAN</strong></div><div><span>Date of birth</span><strong>15 AUG 2003</strong></div><div><span>Valid until</span><strong>14 AUG 2033</strong></div></div>
+
+      <div className="authenticity-box authenticity-success"><div className="authenticity-icon"><Check size={20} /></div><div><strong>{scan.isVerified ? "DOCUMENT AUTHENTIC" : "READY TO VERIFY"}</strong><span>{scan.isVerified ? "No significant tampering detected" : "Start the demo scan to analyze"}</span></div>
+
+      <div className="risk-block"><div className="risk-label"><span>RISK SCORE</span><strong>12 <small>/ 100</small></strong></div><div className="risk-meter"><span style={{ width: `${scan.isVerified ? 12 : 3}%` }} /></div><div className="risk-caption"><span>Low risk</span><span>High risk</span></div></div>
+
+      </section>
+
+      <button className={`verify-button ${scan.isVerified ? "is-verified" : ""}`} onClick={scan.isVerified ? scan.resetScan : startDocumentScan}>{scan.isVerified ? <><Check size={17} /> Verification complete</> : <><Sparkles size={17} /> Run demo verification</>}</button>
+
+      {showAlert && <div className="toast-message" role="status"><div><Sparkles size={15} /><span>{activeMode === "HOME" ? "Pipeline is up to date." : `${modeTitle(activeMode)} loaded with simulated data.`}</span></div><button aria-label="Dismiss" onClick={() => setShowAlert(false)}><X size={14} /></button></div>}
+
+      <footer className="shell-footer"><span>SECURE PROCESSING</span><i /><span>AUDIT LOG ENABLED</span><i /><span>DEMO ENVIRONMENT</span><span className="footer-mark">For a safer world <b /></span></footer>
+
+      <section className="identity-card panel-surface">
+
+      <div className="identity-card-top"><span className="verified-label"><span />MATCH</span><Fingerprint size={18} /></div>
+
+      <div className="identity-portrait-row"><div className="portrait-frame"><div className="portrait-placeholder"><UserRoundCheck size={42} strokeWidth={1} /></div><span className="portrait-scanline" /></div>
+
+      <div className="face-match"><div className="face-wire"><ScanFace size={53} strokeWidth={1} /></div><strong>98.7%</strong><span>FACE MATCH</span></div>
+
+      <div className="identity-name"><span>FICTIONAL DEMO IDENTITY</span><strong>AARYAN SHARMA</strong></div>
+
+      <div className="identity-grid"><div><span>Passport no.</span><strong>S7234567</strong></div><div><span>Nationality</span><strong>INDIAN</strong></div><div><span>Date of birth</span><strong>15 AUG 2003</strong></div><div><span>Valid until</span><strong>14 AUG 2033</strong></div></div>
+
+      <div className="authenticity-box authenticity-success"><div className="authenticity-icon"><Check size={20} /></div><div><strong>{scan.isVerified ? "DOCUMENT AUTHENTIC" : "READY TO VERIFY"}</strong><span>{scan.isVerified ? "No significant tampering detected" : "Start the demo scan to analyze"}</span></div>
+
+      <div className="risk-block"><div className="risk-label"><span>RISK SCORE</span><strong>12 <small>/ 100</small></strong></div><div className="risk-meter"><span style={{ width: `${scan.isVerified ? 12 : 3}%` }} /></div><div className="risk-caption"><span>Low risk</span><span>High risk</span></div></div>
+
+      </section>
+
+      <button className={`verify-button ${scan.isVerified ? "is-verified" : ""}`} onClick={scan.isVerified ? scan.resetScan : startDocumentScan}>{scan.isVerified ? <><Check size={17} /> Verification complete</> : <><Sparkles size={17} /> Run demo verification</>}</button>
+
+      {showAlert && <div className="toast-message" role="status"><div><Sparkles size={15} /><span>{activeMode === "HOME" ? "Pipeline is up to date." : `${modeTitle(activeMode)} loaded with simulated data.`}</span></div><button aria-label="Dismiss" onClick={() => setShowAlert(false)}><X size={14} /></button></div>}
+
+      <footer className="shell-footer"><span>SECURE PROCESSING</span><i /><span>AUDIT LOG ENABLED</span><i /><span>DEMO ENVIRONMENT</span><span className="footer-mark">For a safer world <b /></span></footer>
