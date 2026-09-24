@@ -111,55 +111,60 @@ def is_document(image_bgr: np.ndarray) -> Dict:
 
 
 def _detect_text_regions(image_bgr: np.ndarray) -> float:
-    """Detect text-like regions using MSER + geometry filters."""
-    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+    """Detect actual text LINES rather than arbitrary blobs.
 
-    # MSER detector
-    mser = cv2.MSER_create()
-    mser.setMinArea(30)
-    mser.setMaxArea(int(gray.shape[0] * gray.shape[1] * 0.1))
+    The earlier MSER version treated every blobby region as a character and
+    every y-shift as a new line, so plain photographs scored text_content = 1.0
+    and sailed past the document threshold. Real text is rows of similar-height
+    glyphs fused into wide horizontal runs.
+    """
+    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+    h, w = gray.shape
+
+    # Adaptive binarisation picks up glyphs on light and dark backgrounds alike
+    thr = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                cv2.THRESH_BINARY_INV, 31, 15)
+
+    # Fuse neighbouring glyphs into horizontal runs (text lines)
+    kern = cv2.getStructuringElement(cv2.MORPH_RECT, (max(12, w // 30), 3))
+    merged = cv2.morphologyEx(thr, cv2.MORPH_CLOSE, kern)
+    # Drop isolated speckle
+    merged = cv2.morphologyEx(merged, cv2.MORPH_OPEN,
+                              cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)))
 
     try:
-        regions, _ = mser.detectRegions(gray)
+        n, _, stats, _ = cv2.connectedComponentsWithStats(merged, 8)
     except Exception:
         return 0.0
 
-    if not regions:
+    boxes = []
+    for i in range(1, n):
+        x, y, cw, ch, area = stats[i]
+        if ch < 5 or ch > h * 0.15:     # plausible glyph/line height
+            continue
+        if cw / ch < 4.0:               # a run of text is wide, not square
+            continue
+        if cw < w * 0.05:               # too short to be a line of text
+            continue
+        if area < 40:
+            continue
+        boxes.append(ch)
+
+    if not boxes:
         return 0.0
 
-    # Filter for text-like regions: rectangular, similar height, aligned
-    text_candidates = []
-    for region in regions:
-        x, y, w, h = cv2.boundingRect(region)
-        aspect = w / (h + 1e-6)
-        area = w * h
+    # Documents contain several lines of *similar* height; photo texture does not
+    heights = sorted(boxes)
+    med = heights[len(heights) // 2]
+    similar = sum(1 for ch in heights if 0.5 * med <= ch <= 2.0 * med)
 
-        # Text characters: roughly 0.3 < aspect < 3.0, small to medium size
-        if 0.2 < aspect < 4.0 and 50 < area < gray.shape[0] * gray.shape[1] * 0.05:
-            text_candidates.append((x, y, w, h))
-
-    if not text_candidates:
-        return 0.0
-
-    # Check if text candidates form lines (horizontal alignment)
-    if len(text_candidates) < 3:
-        return 0.2
-
-    # Group by y-coordinate (text lines)
-    y_coords = [c[1] for c in text_candidates]
-    y_sorted = sorted(y_coords)
-    line_count = 1
-    for i in range(1, len(y_sorted)):
-        if y_sorted[i] - y_sorted[i-1] > 10:
-            line_count += 1
-
-    # Documents typically have multiple text lines
-    if line_count >= 3:
-        return min(0.5 + line_count * 0.05, 1.0)
-    elif line_count >= 1:
-        return 0.3
-    else:
-        return 0.1
+    if similar >= 4:
+        return 1.0
+    if similar >= 3:
+        return 0.8
+    if similar == 2:
+        return 0.6
+    return 0.3
 
 
 def _check_document_colors(image_bgr: np.ndarray) -> float:

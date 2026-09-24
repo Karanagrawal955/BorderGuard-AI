@@ -39,3 +39,19 @@ models/training_metadata.json
 
 # TruFor third-party code (cloned fresh, not vendored)
 third_party/TruFor/
+
+# Node / frontend
+node_modules/
+frontend/**/node_modules/
+npm-debug.log*
+.manus-logs/
+*.tsbuildinfo
+
+# Transient uploads
+uploads/*
+!uploads/.gitkeep
+
+# Environment / secrets — never commit
+.env
+.env.*
+*.local

@@ -19,10 +19,15 @@ from typing import Dict, List, Optional
 
 
 WEIGHTS = {
-    "classifier": 0.40,
-    "ocr": 0.25,
-    "structure": 0.20,
-    "image_quality": 0.15,
+    # Forensic / tamper evidence + format checks dominate.
+    # "Readable text" and "sharp image" are NOT authenticity signals — a
+    # well-formatted forgery passes those easily — so they only fine-tune.
+    "classifier": 0.45,     # ML P(tampered) from block-ELA/noise/DCT features
+    "validation": 0.20,     # checksum + format rules (Verhoeff/PAN/MRZ/dates)
+    "trufor": 0.10,         # tamper heatmap
+    "ocr": 0.10,            # OCR consistency (font/spacing/checksum flags)
+    "structure": 0.05,      # expected fields present
+    "image_quality": 0.05,  # resolution / aspect ratio
 }
 
 
@@ -137,6 +142,10 @@ def _validation_score(validation_result) -> float:
     """Score based on document format validation."""
     if validation_result is None:
         return 50.0  # No validation performed
+
+    if hasattr(validation_result, "results") and not validation_result.results:
+        # Validation ran but had no fields to check — neutral, not a free pass
+        return 50.0
 
     if hasattr(validation_result, "score"):
         return float(validation_result.score)
@@ -262,13 +271,65 @@ def compute_authenticity_score(
     else:
         result.face_component = 50.0
 
-    # Weighted combination
-    final = (
-        w.get("classifier", 0.40) * result.classifier_component
-        + w.get("ocr", 0.25) * result.ocr_component
-        + w.get("structure", 0.20) * result.structure_component
-        + w.get("image_quality", 0.15) * result.image_quality_component
-    )
+    # Weighted combination — forensic + format evidence dominate.
+    # When format validation had nothing to check (no ID number / dates could
+    # be read), drop that component and renormalise the rest. Scoring it as a
+    # flat 50 would silently penalise every document whose ID number OCR missed.
+    validation_available = bool(validation_result is not None
+                                and getattr(validation_result, "results", None))
+
+    component_of = {
+        "classifier": result.classifier_component,
+        "validation": result.validation_component,
+        "trufor": result.trufor_component,
+        "ocr": result.ocr_component,
+        "structure": result.structure_component,
+        "image_quality": result.image_quality_component,
+    }
+    avail = {k: v for k, v in w.items()
+             if k in component_of and (validation_available or k != "validation")}
+    if not avail:
+        avail = {k: 1.0 for k in component_of}
+    total_w = sum(avail.values()) or 1.0
+
+    final = sum((avail[k] / total_w) * component_of[k] for k in avail)
+
+    # ── Hard verdict rules ────────────────────────────────────────────────
+    # Readability / resolution / field-count must never rescue a document
+    # that fails tamper detection or format checks, and a clean document
+    # must not be dragged down by JPEG noise.
+    p_tampered = float(classifier_output.get("probability", 0.5)) if classifier_output else 0.5
+    cls_tampered = bool(classifier_output.get("prediction", 0)) if classifier_output else False
+
+    if p_tampered >= 0.85:
+        final = min(final, 30.0)                       # strong tamper -> FORGED
+        flags.append({"check": "classifier", "status": "FAIL",
+                      "message": f"Strong tampering indicators (P={p_tampered:.2f})"})
+    elif p_tampered >= 0.65 or (cls_tampered and p_tampered >= 0.55):
+        final = min(final, 45.0)                       # tamper -> LIKELY_FORGED
+        flags.append({"check": "classifier", "status": "FAIL",
+                      "message": f"Tampering indicators detected (P={p_tampered:.2f})"})
+
+    if result.validation_errors > 0 and cls_tampered:
+        # Checksum/format failure only *proves* forgery when the forensic model
+        # agrees. OCR routinely misreads a single digit, so an uncorroborated
+        # failure must never brand a genuine document invalid.
+        final = min(final, 45.0)
+        flags.append({"check": "validation", "status": "FAIL",
+                      "message": f"{result.validation_errors} format/checksum error(s) "
+                                 f"confirmed by tamper analysis — document fails validation"})
+    elif result.validation_errors > 0:
+        flags.append({"check": "validation", "status": "WARN",
+                      "message": f"{result.validation_errors} format/checksum warning(s) "
+                                 f"(could be an OCR misread) — no tamper evidence to corroborate"})
+
+    # No tamper signal, no format errors, readable text => confirmed authentic.
+    # The floor keeps a genuinely clean document comfortably above the GENUINE
+    # cut-off instead of hovering a point under it on model noise.
+    if (p_tampered <= 0.35 and not cls_tampered and result.validation_errors == 0
+            and result.ocr_component >= 40 and result.trufor_component >= 60):
+        final = max(final, 72.0)
+
     result.final_score = max(0.0, min(100.0, final))
     result.risk_level = _risk_level(result.final_score)
 
@@ -279,8 +340,6 @@ def compute_authenticity_score(
         flags.append({"check": "structure", "status": "FAIL", "message": "No document structure detected"})
     if result.image_quality_component < 40:
         flags.append({"check": "image_quality", "status": "WARN", "message": "Poor image quality"})
-    if classifier_output and classifier_output.get("probability", 0) > 0.7:
-        flags.append({"check": "classifier", "status": "WARN", "message": "Tampering indicators detected"})
     result.flags = flags
 
     result.extracted_fields = ocr_fields

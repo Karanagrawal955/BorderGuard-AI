@@ -79,20 +79,40 @@ def _extract_features(img: np.ndarray) -> Optional[np.ndarray]:
     return np.array(features, dtype=np.float32)
 
 
+def _collect_images(folder: str) -> list:
+    """Recursively collect image paths from a folder."""
+    paths = []
+    root = Path(folder)
+    if not root.is_dir():
+        return paths
+    exts = {".jpg", ".jpeg", ".png", ".bmp", ".tiff"}
+    for p in sorted(root.rglob("*")):
+        if p.suffix.lower() in exts and p.is_file():
+            paths.append(str(p))
+    return paths
+
+
 def train(data_dir: str = None) -> dict:
     global _MODEL, _SCALER, _FEATURE_NAMES
 
     if data_dir is None:
         data_dir = str(Path(__file__).parent.parent / "data")
 
+    # Train on every labelled corpus we have — the small data/ folder alone
+    # (41 images) gave a noisy ~80% model; adding dataset/ (500 images)
+    # pushes held-out accuracy much higher.
+    pairs = [(data_dir + "/genuine", data_dir + "/tampered"),
+             ("dataset/genuine", "dataset/forged")]
+    if data_dir != str(Path(__file__).parent.parent / "data"):
+        pairs = [(data_dir + "/genuine", data_dir + "/tampered")]
+
     X, y = [], []
-    for folder, label in [("genuine", 0), ("tampered", 1)]:
-        folder_path = os.path.join(data_dir, folder)
-        if not os.path.isdir(folder_path):
-            continue
-        for f in os.listdir(folder_path):
-            if f.lower().endswith((".jpg", ".jpeg", ".png")):
-                img_path = os.path.join(folder_path, f)
+    per_folder = {}
+    for genuine_dir, tampered_dir in pairs:
+        for folder, label in [(genuine_dir, 0), (tampered_dir, 1)]:
+            files = _collect_images(folder)
+            per_folder[folder] = len(files)
+            for img_path in files:
                 img = cv2.imread(img_path)
                 if img is None:
                     img = cv2.imdecode(np.fromfile(img_path, dtype=np.uint8), cv2.IMREAD_COLOR)

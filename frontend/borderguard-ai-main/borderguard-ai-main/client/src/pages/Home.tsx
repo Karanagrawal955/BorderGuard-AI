@@ -59,6 +59,39 @@ const cases = [
   { id: "BG-20478", reason: "All checks passed", risk: "08", status: "Verified", tone: "low", checkpoint: "T3 · New Delhi" },
 ];
 
+// Three-way outcome: an image may be a genuine document, a tampered one, or
+// not an identity document at all. Only the first two are tampering-related.
+function verdictText(r: ScanResult | null) {
+  if (r && r.isDocument === false) {
+    return {
+      badge: "INVALID",
+      title: "INVALID DOCUMENT",
+      headline: "INVALID DOCUMENT",
+      detail: "No identity document detected — cannot verify",
+      tone: "#ff7068",
+      warn: true,
+    };
+  }
+  if (r && r.isTampered) {
+    return {
+      badge: "REVIEW",
+      title: "TAMPERING DETECTED",
+      headline: "REVIEW REQUIRED",
+      detail: `Risk ${r.riskLevel} — officer review recommended`,
+      tone: "#ff7068",
+      warn: true,
+    };
+  }
+  return {
+    badge: "MATCH",
+    title: "DOCUMENT AUTHENTIC",
+    headline: "DOCUMENT AUTHENTIC",
+    detail: "No significant tampering detected",
+    tone: "#5cf298",
+    warn: false,
+  };
+}
+
 function modeTitle(mode: Mode) {
   return { HOME: "Command center", DOCUMENT_SCAN: "Document scan", LIVE_VERIFICATION: "Live verification", GLOBAL_INTELLIGENCE: "Global intelligence", RISK_ANALYSIS: "Risk analysis", DATABASE: "Database validation", ANALYTICS: "Analytics command", CASE_RECORDS: "Case records" }[mode];
 }
@@ -66,9 +99,10 @@ function modeTitle(mode: Mode) {
 interface ScanResult {
   authenticityScore: number;
   isTampered: boolean;
+  isDocument?: boolean;
   ocrText: string;
   riskLevel: "Low" | "Medium" | "High";
-  decision: "Verify" | "Review";
+  decision: "Verify" | "Review" | "Reject";
   status: "complete" | "error";
   source: string;
   // Detailed fields from new backend (optional)
@@ -146,7 +180,14 @@ export default function Home() {
   }, [uploadState, testCounter]);
 
   const enterCommandCenter = () => { setIntroVisible(false); setActiveMode("HOME"); };
-  const startDocumentScan = () => { setIntroVisible(false); setActiveMode("DOCUMENT_SCAN"); scan.startScan(); };
+  const startDocumentScan = () => {
+    setIntroVisible(false);
+    setActiveMode("DOCUMENT_SCAN");
+    // Reset only — NOT scan.startScan(). Starting the animation here left
+    // scan.isRunning stuck true, which disabled the "Verify / Scan" button
+    // forever (performScan starts the animation itself).
+    scan.resetScan();
+  };
   const handleNav = (item: NavItem) => { setActiveMode(item.mode); setMobileNav(false); setShowAlert(true); };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -166,6 +207,10 @@ export default function Home() {
       }
       const preview = URL.createObjectURL(file);
       fileRef.current = file;
+      // A previous scan leaves scan.isRunning true, which keeps the
+      // "Verify / Scan" button stuck on "Scanning…". Picking a new file
+      // starts over, so reset the animation (performScan starts it itself).
+      scan.resetScan();
       flushSync(() => {
         setUploadState({ isScanning: false, scanResult: null, selectedFile: file, previewUrl: preview, fileName: file.name, fileSize: file.size, fileKey: Date.now() });
       });
@@ -245,6 +290,7 @@ export default function Home() {
         result = {
           authenticityScore: data.authenticityScore ?? Math.round(data.results.overall_score),
           isTampered: data.isTampered ?? data.results.tampering_detected ?? false,
+          isDocument: data.isDocument ?? data.results?.is_document ?? true,
           ocrText: data.ocrText ?? data.results.ocr_text ?? "",
           riskLevel: data.riskLevel ?? (data.results.risk_level === "GENUINE" ? "Low" : data.results.risk_level === "SUSPICIOUS" ? "Medium" : "High"),
           decision: data.decision ?? (data.results.risk_level === "GENUINE" ? "Verify" : "Review"),
@@ -263,6 +309,7 @@ export default function Home() {
         result = {
           authenticityScore: r.overall_score ?? 50,
           isTampered: r.tampering_detected ?? false,
+          isDocument: r.is_document ?? true,
           ocrText: r.ocr_text ?? Object.values(r.extracted_fields ?? {}).join(" ") ?? "",
           riskLevel: r.risk_level === "GENUINE" ? "Low" : r.risk_level === "SUSPICIOUS" ? "Medium" : "High",
           decision: r.risk_level === "GENUINE" ? "Verify" : "Review",
@@ -327,6 +374,8 @@ export default function Home() {
     fileInputRef.current?.click();
   };
 
+  const v = verdictText(uploadState.scanResult);
+
   return (
     <main className={`borderguard-shell ${introVisible ? "intro-active" : ""}`}>
       <div className="hud-cursor" aria-hidden="true" />
@@ -359,8 +408,8 @@ export default function Home() {
         {uploadState.scanResult ? (
           <section className="identity-card panel-surface">
             <div className="identity-card-top">
-              <span className="verified-label" style={{ color: uploadState.scanResult.isTampered ? "#ff7068" : "#5cf298" }}>
-                <span style={{ background: uploadState.scanResult.isTampered ? "#ff7068" : "#5cf298" }} />{uploadState.scanResult.isTampered ? "REVIEW" : "MATCH"}
+              <span className="verified-label" style={{ color: v.tone }}>
+                <span style={{ background: v.tone }} />{v.badge}
               </span>
               <Fingerprint size={18} />
             </div>
@@ -375,21 +424,21 @@ export default function Home() {
               </div>
               <div className="face-match">
                 <div className="face-wire"><ScanFace size={53} strokeWidth={1} /></div>
-                <strong style={{ color: uploadState.scanResult.isTampered ? "#ff7068" : "#5cf298" }}>{uploadState.scanResult.authenticityScore}%</strong><span>AUTH SCORE</span>
+                <strong style={{ color: v.tone }}>{uploadState.scanResult.authenticityScore}%</strong><span>AUTH SCORE</span>
               </div>
             </div>
-            <div className="identity-name"><span>BACKEND RESULT · {uploadState.scanResult.source}</span><strong style={{ color: uploadState.scanResult.isTampered ? "#ff7068" : "#5cf298" }}>{uploadState.scanResult.decision === "Verify" ? "DOCUMENT AUTHENTIC" : "REVIEW REQUIRED"}</strong></div>
+            <div className="identity-name"><span>BACKEND RESULT · {uploadState.scanResult.source}</span><strong style={{ color: v.tone }}>{v.headline}</strong></div>
             <div className="identity-grid">
               <div><span>Risk level</span><strong style={{ color: uploadState.scanResult.riskLevel === "High" ? "#ff7068" : uploadState.scanResult.riskLevel === "Medium" ? "#f1bb66" : "#5cf298" }}>{uploadState.scanResult.riskLevel.toUpperCase()}</strong></div>
               <div><span>Decision</span><strong>{uploadState.scanResult.decision.toUpperCase()}</strong></div>
               <div><span>OCR text</span><strong style={{ fontSize: "8px", lineHeight: "1.4" }}>{uploadState.scanResult.ocrText ? uploadState.scanResult.ocrText.slice(0, 60) + (uploadState.scanResult.ocrText.length > 60 ? "…" : "") : "No text"}</strong></div>
               <div><span>Source</span><strong>SIH26188</strong></div>
             </div>
-            <div className={`authenticity-box ${uploadState.scanResult.isTampered ? "authenticity-warn" : "authenticity-success"}`}>
-              <div className="authenticity-icon">{uploadState.scanResult.isTampered ? <AlertTriangle size={20} /> : <Check size={20} />}</div>
+            <div className={`authenticity-box ${v.warn ? "authenticity-warn" : "authenticity-success"}`}>
+              <div className="authenticity-icon">{v.warn ? <AlertTriangle size={20} /> : <Check size={20} />}</div>
               <div>
-                <strong>{uploadState.scanResult.isTampered ? "TAMPERING DETECTED" : "DOCUMENT AUTHENTIC"}</strong>
-                <span>{uploadState.scanResult.isTampered ? `Risk ${uploadState.scanResult.riskLevel} — officer review recommended` : "No significant tampering detected"}</span>
+                <strong>{v.title}</strong>
+                <span>{v.detail}</span>
               </div>
             </div>
             <div className="risk-block">
@@ -445,6 +494,7 @@ function DashboardMode({ scan, currentLabel, activeMode, startDocumentScan, uplo
   const isScanning = uploadState.isScanning || scan.isRunning;
   const hasFile = !!uploadState.selectedFile || !!uploadState.fileName;
   const hasResult = !!uploadState.scanResult;
+  const notADocument = uploadState.scanResult?.isDocument === false;
 
   return (
     <div className="workspace-grid" style={{ display: "grid" }}>
@@ -555,9 +605,9 @@ function DashboardMode({ scan, currentLabel, activeMode, startDocumentScan, uplo
 
           {/* Real backend result — replaces fake demo numbers */}
           {hasResult && (
-            <div style={{ marginTop: 4, padding: 10, borderRadius: 8, background: uploadState.scanResult.isTampered ? "rgba(255,112,104,.08)" : "rgba(92,242,152,.08)", border: `1px solid ${uploadState.scanResult.isTampered ? "rgba(255,112,104,.3)" : "rgba(92,242,152,.3)"}` }}>
+            <div style={{ marginTop: 4, padding: 10, borderRadius: 8, background: notADocument || uploadState.scanResult.isTampered ? "rgba(255,112,104,.08)" : "rgba(92,242,152,.08)", border: `1px solid ${notADocument || uploadState.scanResult.isTampered ? "rgba(255,112,104,.3)" : "rgba(92,242,152,.3)"}` }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <span style={{ font: "8px IBM Plex Mono, monospace", letterSpacing: ".12em", color: uploadState.scanResult.isTampered ? "#ff7068" : "#5cf298" }}>{uploadState.scanResult.isTampered ? "REVIEW REQUIRED" : "VERIFIED"}</span>
+                <span style={{ font: "8px IBM Plex Mono, monospace", letterSpacing: ".12em", color: notADocument || uploadState.scanResult.isTampered ? "#ff7068" : "#5cf298" }}>{notADocument ? "INVALID DOCUMENT" : uploadState.scanResult.isTampered ? "REVIEW REQUIRED" : "VERIFIED"}</span>
                 <strong style={{ font: "14px IBM Plex Mono, monospace", color: "#eaf9fd" }}>{uploadState.scanResult.authenticityScore}/100</strong>
               </div>
               <div style={{ font: "8px IBM Plex Mono, monospace", color: "#6e909d", marginTop: 6, lineHeight: "1.5", wordBreak: "break-word" }}>
@@ -630,6 +680,7 @@ function OperationalMode({ mode, forensicMode, setForensicMode, selectedCase, se
   const risk = hasResult ? scanResult.riskLevel : "—";
   const riskScore = hasResult ? 100 - score : 0;
   const isTampered = hasResult ? scanResult.isTampered : false;
+  const notDoc = hasResult ? scanResult.isDocument === false : false;
   const ocrText = hasResult ? (scanResult.ocrText || "") : "";
   const decision = hasResult ? scanResult.decision : "—";
   const fields = hasResult ? (scanResult.details?.extracted_fields || scanResult.extracted_fields || {}) : {};
@@ -640,6 +691,7 @@ function OperationalMode({ mode, forensicMode, setForensicMode, selectedCase, se
     ["OCR text", ocrText ? `${ocrText.length} chars` : "None", ocrText ? "good" : "neutral"],
     ["Fields detected", `${Object.values(fields).filter((v: any) => v && String(v).trim()).length}`, "neutral"],
     ["Decision", decision, decision === "Verify" ? "good" : "warn"],
+    ["Document status", notDoc ? "Not a document" : "Identity document", notDoc ? "warn" : "good"],
     ["Classifier confidence", hasResult ? `${Math.round((scanResult.details?.classifier_output?.confidence || 0) * 100)}%` : "—", "neutral"],
   ] : [
     ["Document integrity", "—", "neutral"], ["Identity match", "—", "neutral"], ["Expiry status", "—", "neutral"],
@@ -684,9 +736,9 @@ function OperationalMode({ mode, forensicMode, setForensicMode, selectedCase, se
         {mode === "CASE_RECORDS" && (
           <div className="cases-panel">
             {hasResult && (
-              <button onClick={() => setSelectedCase({ id: "SCAN-001", reason: isTampered ? "Tampering detected" : "Document verified", risk: String(score), status: decision, tone: isTampered ? "high" : "low", checkpoint: "Current Scan" })} style={{ width: "100%", textAlign: "left", padding: 12, marginBottom: 8, border: `1px solid ${riskColor}55`, background: `${riskColor}11`, borderRadius: 8 }}>
+              <button onClick={() => setSelectedCase({ id: "SCAN-001", reason: notDoc ? "Not an identity document" : isTampered ? "Tampering detected" : "Document verified", risk: String(score), status: decision, tone: notDoc || isTampered ? "high" : "low", checkpoint: "Current Scan" })} style={{ width: "100%", textAlign: "left", padding: 12, marginBottom: 8, border: `1px solid ${riskColor}55`, background: `${riskColor}11`, borderRadius: 8 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", font: "9px IBM Plex Mono, monospace" }}><span style={{ color: "#6e909d" }}>LATEST SCAN</span><span style={{ color: riskColor }}>{score}/100</span></div>
-                <div style={{ fontSize: 11, color: "#dbeef2", marginTop: 6 }}>{isTampered ? "Tampering detected" : "Document authentic"} — {decision}</div>
+                <div style={{ fontSize: 11, color: "#dbeef2", marginTop: 6 }}>{notDoc ? "Invalid document" : isTampered ? "Tampering detected" : "Document authentic"} — {decision}</div>
                 <div style={{ font: "8px IBM Plex Mono, monospace", color: "#6e909d", marginTop: 4 }}>Risk: {risk} · {ocrText ? ocrText.slice(0, 40) + "…" : "No OCR"}</div>
               </button>
             )}

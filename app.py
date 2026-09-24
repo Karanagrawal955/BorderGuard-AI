@@ -64,6 +64,131 @@ def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in {"png", "jpg", "jpeg", "bmp", "tiff", "webp"}
 
 
+import re as _re
+
+# Minimum alphanumeric characters OCR must recover before an image can be an
+# identity document. Measured: random photographs produce 0-11, a promotional
+# poster 116, every genuine/tampered identity document 37-316.
+# Text alone is not sufficient — see _identity_signals().
+MIN_DOCUMENT_CHARS = 20
+
+
+def _extract_id_fields(text: str) -> dict:
+    """Regex extraction of ID numbers/dates from OCR text.
+
+    ocr_module joins detected words with spaces (no newlines), so line-based
+    keyword parsing never fires. Patterns work on the whole blob instead.
+    """
+    fields = {}
+    if not text:
+        return fields
+
+    # PAN: ABCDE1234F
+    m = _re.search(r"\b([A-Z]{5}\d{4}[A-Z])\b", text.upper())
+    if m:
+        fields["pan"] = m.group(1)
+
+    # Aadhaar: 12 digits, optional space/dash separators
+    m = _re.search(r"\b(\d{4}[\s-]?\d{4}[\s-]?\d{4})\b", text)
+    if m and not fields.get("pan"):
+        fields["aadhaar"] = m.group(1)
+    elif m and fields.get("pan") and m.group(1).replace(" ", "").replace("-", "") not in fields["pan"]:
+        fields["aadhaar"] = m.group(1)
+
+    # Passport number: 1 letter + 7 digits
+    m = _re.search(r"\b([A-Z]\d{7})\b", text.upper())
+    if m:
+        fields["passport_number"] = m.group(1)
+
+    # DOB / dates
+    m = _re.search(r"\b(\d{2}[./-]\d{2}[./-]\d{4})\b", text)
+    if m:
+        fields["dob"] = m.group(1)
+
+    # Expiry (labelled)
+    m = _re.search(r"(?:expiry|expires|valid till|date of expiry|valid until)\D{0,20}(\d{2}[./-]\d{2}[./-]\d{4})",
+                   text, _re.IGNORECASE)
+    if m:
+        fields["expiry"] = m.group(1)
+
+    # Gender
+    m = _re.search(r"\b(male|female|m|f)\b", text, _re.IGNORECASE)
+    if m:
+        fields["gender"] = m.group(1).upper()
+
+    # Name after an explicit label
+    m = _re.search(r"(?:^|\s)name\s*[:\-]?\s*([A-Za-z][A-Za-z .'\-]{2,60})", text, _re.IGNORECASE)
+    if m:
+        fields["name"] = m.group(1).strip()
+
+    return fields
+
+
+# ── Identity-document content ──────────────────────────────────────────────
+# "Has readable text" is NOT enough: posters, headlines and screenshots carry
+# plenty of text too (the Formula-1 banner read 116 characters). An identity
+# document additionally carries an ID number, an issuing authority, or labelled
+# personal fields. All patterns are OCR-tolerant because EasyOCR garbles these
+# badly ("INCOMETaK", "GOVTAORINDIA", "Permanent Accouni Nun.").
+# Validated offline: 23/23 genuine + 18/18 forged ID cards matched; a
+# promotional poster and 5 random photographs matched nothing.
+_HARD_ID = _re.compile(
+    r"\b[A-Z]{5}\d{4}[A-Z]\b"            # PAN: ABCDE1234F
+    r"|\b\d{4}[\s-]?\d{4}[\s-]?\d{4}\b"  # Aadhaar: 12 digits
+    r"|\b[A-Z]\d{7}\b"                   # passport number
+    r"|\b[PDI][<A-Z<>\d]{10,}",          # MRZ line
+    _re.IGNORECASE,
+)
+_ISSUER = _re.compile(
+    r"accou\w*\s*(?:number|nun\.?|num\.?|no\.?)"  # "Permanent Account Number"
+    r"|income[\s.]*ta[xk]"                        # INCOME TAX DEPARTMENT
+    r"|aadhaa?r|uidai|unique\s*identification"
+    r"|passport|driving\s*licen[cs]e"
+    r"|voter|election\s*commission",
+    _re.IGNORECASE,
+)
+_GOVT = _re.compile(r"govt\w*|government", _re.IGNORECASE)
+_INDIA = _re.compile(r"india", _re.IGNORECASE)
+_DATE_FIELD = _re.compile(r"\b\d{2}[./-]\d{2}[./-]\d{4}\b")
+_NAME_LABEL = _re.compile(r"\bname\s*[:\-]?\s+[A-Za-z]", _re.IGNORECASE)
+
+
+def _identity_signals(text: str) -> dict:
+    """Identity-document cues recovered from OCR text."""
+    t = text or ""
+    sig = {
+        "id_number": bool(_HARD_ID.search(t)),
+        "issuing_authority": bool(_ISSUER.search(t)),
+        "government_of_india": bool(_GOVT.search(t)) and bool(_INDIA.search(t)),
+        "date_field": bool(_DATE_FIELD.search(t)),
+        "name_label": bool(_NAME_LABEL.search(t)),
+    }
+    sig["any"] = any(v for k, v in sig.items() if k != "any")
+    return sig
+
+
+def _detect_document_type(image_path: str, fields: dict) -> str:
+    """Detect document type from filename first, then from extracted fields."""
+    filename = Path(image_path).name.lower()
+
+    if "passport" in filename:
+        return "INDIAN_PASSPORT"
+    if "visa" in filename:
+        return "VISA"
+    if "pan" in filename:
+        return "INDIAN_PAN"
+    if "aadhaar" in filename or "aadhar" in filename:
+        return "INDIAN_AADHAAR"
+
+    if fields.get("passport_number"):
+        return "INDIAN_PASSPORT"
+    if fields.get("pan"):
+        return "INDIAN_PAN"
+    if fields.get("aadhaar"):
+        return "INDIAN_AADHAAR"
+    return "UNKNOWN"
+
+
 def run_full_pipeline(image_path):
     """Run the complete SIH26188 pipeline on an image and return structured results.
 
@@ -285,6 +410,33 @@ def run_full_pipeline(image_path):
     except Exception:
         pass
 
+    # Step 7.5: Format + checksum validation (Verhoeff / PAN / passport / dates)
+    validation_report = None
+    doc_type = "UNKNOWN"
+    try:
+        id_fields = _extract_id_fields(ocr_text)
+        # Merge with any keyword-parsed fields so validators see everything
+        if ocr_fields.get("name") and not id_fields.get("name"):
+            id_fields["name"] = ocr_fields["name"]
+        if ocr_fields.get("dob") and not id_fields.get("dob"):
+            id_fields["dob"] = ocr_fields["dob"]
+        if ocr_fields.get("expiry_date") and not id_fields.get("expiry"):
+            id_fields["expiry"] = ocr_fields["expiry_date"]
+
+        doc_type = _detect_document_type(image_path, id_fields)
+        if doc_type != "UNKNOWN" and id_fields:
+            from pipeline.document_validation import auto_validate
+            validation_report = auto_validate(doc_type, id_fields)
+            print(f"[pipeline] Validation {doc_type}: score={validation_report.score:.0f} "
+                  f"errors={validation_report.errors} warnings={validation_report.warnings}")
+        else:
+            print(f"[pipeline] Validation skipped (doc_type={doc_type}, fields={list(id_fields)})")
+        # Keep UI-facing fields in sync with what was actually validated
+        ocr_fields.update({k: v for k, v in id_fields.items() if v})
+    except Exception as e:
+        print(f"[pipeline] Validation failed: {e}")
+        validation_report = None
+
     # Step 8: Scoring engine — real weighted scoring
     try:
         # Ensure heatmap is passed correctly
@@ -292,7 +444,7 @@ def run_full_pipeline(image_path):
             classifier_output=classifier_output,
             heatmap_mean=heatmap_mean,
             ocr_result=ocr_result,
-            validation_result=None,
+            validation_result=validation_report,
             face_result=None,
             extracted_fields=ocr_fields,
             ocr_text=ocr_text,
@@ -335,13 +487,65 @@ def run_full_pipeline(image_path):
     # Tampering flag for frontend — use risk level from scoring, not heuristic
     is_tampered = bool(risk_level_raw in ["LIKELY_FORGED", "FORGED"])
 
-    # OVERRIDE: If not a document, force score down and flag as suspicious
-    if not doc_detection.get("is_document", True):
+    # ── Document vs non-document gate ───────────────────────────────────────
+    # Decisive signal: how much machine-readable text OCR actually recovered.
+    # Measured separation — random photographs: 0-11 alphanumeric characters;
+    # every genuine AND every tampered identity document: 37-124.
+    # The geometric detector alone is not usable here (it scores plain photos
+    # and a dense ID card all over the map once images are squashed to
+    # 512x512), so it is kept as supporting evidence only.
+    ocr_alnum = len(_re.sub(r"[^A-Za-z0-9]", "", ocr_text or ""))
+    geom_ok = bool(doc_detection.get("is_document", True))
+    geom_reason = doc_detection.get("reason", "")
+    geom_conf = float(doc_detection.get("confidence", 0.0))
+    geom_scores = dict(doc_detection.get("scores") or {})
+    id_signals = _identity_signals(ocr_text)
+    has_text = ocr_alnum >= MIN_DOCUMENT_CHARS
+    # BOTH required: readable text AND identity-document content. Text alone
+    # let a promotional banner through as a document (scored 30, "tampered").
+    is_doc_final = has_text and id_signals["any"]
+
+    if is_doc_final:
+        conf = max(geom_conf, 0.60) if geom_ok else min(0.90, 0.55 + ocr_alnum / 400.0)
+        cues = ", ".join(k for k, v in id_signals.items() if k != "any" and v)
+        reason = f"Identity document detected — cues: {cues}"
+        if not geom_ok:
+            reason += "; layout check inconclusive"
+    else:
+        conf = min(geom_conf, 0.25)
+        if not has_text:
+            reason = (
+                f"Not a document: only {ocr_alnum} readable character(s) found — "
+                f"no identity-document content"
+            )
+        else:
+            reason = (
+                f"Not an identity document: {ocr_alnum} characters of text but no "
+                f"Aadhaar/PAN/passport number, issuing authority or ID fields"
+            )
+        if not geom_ok and geom_reason:
+            reason += f" [{geom_reason}]"
+
+    doc_detection = {
+        "is_document": is_doc_final,
+        "confidence": round(conf, 3),
+        "reason": reason,
+        "scores": {
+            **geom_scores,
+            "ocr_text_chars": ocr_alnum,
+            "identity_signals": {k: v for k, v in id_signals.items() if k != "any"},
+        },
+    }
+
+    # OVERRIDE: this is not an identity document at all, so reject it.
+    # Crucially isTampered stays False — a holiday photo is NOT tampered, and
+    # flagging it as such made the UI report "TAMPERING DETECTED".
+    if not is_doc_final:
         overall_score = max(0, min(overall_score, 25))
         riskLevel = "High"
-        decision = "Review"
-        is_tampered = True
-        risk_level_raw = "FORGED"
+        decision = "Reject"
+        is_tampered = False
+        risk_level_raw = "NOT_A_DOCUMENT"
         # Add document detection flag
         flags.append({
             "check": "document_detection",
@@ -365,6 +569,9 @@ def run_full_pipeline(image_path):
 
     xai_breakdown = [
         {"feature": "Document Detection", "contribution": round(doc_detection.get("confidence", 0) * 100, 2), "tooltip": doc_detection.get("reason", "Unknown")},
+        {"feature": "Format Validation", "contribution": round(validation_report.score, 2) if validation_report else 50.0,
+         "tooltip": (f"{doc_type}: {validation_report.errors} error(s), {validation_report.warnings} warning(s)"
+                     if validation_report else "No ID format checks available for this document")},
         {"feature": "TruFor Mean", "contribution": round(trufor_mean_feat * 100, 2), "tooltip": f"Heatmap mean {heatmap_mean:.3f} — overall tampering probability"},
         {"feature": "TruFor Std", "contribution": round(trufor_std_feat * 100, 2), "tooltip": "Variance in heatmap — hotspot concentration"},
         {"feature": "TruFor Max", "contribution": round(trufor_max_feat * 100, 2), "tooltip": f"Peak tampering score {heatmap_max:.3f}"},
@@ -385,11 +592,31 @@ def run_full_pipeline(image_path):
         "mrz_data": mrz_data,
         "mrz_raw": mrz_raw,
         "tampering_detected": is_tampered,
+        "is_document": is_doc_final,
+        "ocr_alnum_chars": ocr_alnum,
+        "identity_signals": {k: v for k, v in id_signals.items() if k != "any"},
         "heatmap_mean": heatmap_mean,
         "heatmap_max": heatmap_max,
         "heatmap_std": heatmap_std,
         "xai_breakdown": xai_breakdown,
         "document_detection": doc_detection,
+        "document_validation": {
+            "document_type": doc_type,
+            "score": round(validation_report.score, 1) if validation_report else None,
+            "errors": validation_report.errors if validation_report else 0,
+            "warnings": validation_report.warnings if validation_report else 0,
+            "overall_valid": validation_report.overall_valid if validation_report else None,
+            "checks": [
+                {
+                    "field": r.field_name,
+                    "check": r.check_name,
+                    "valid": r.is_valid,
+                    "severity": r.severity,
+                    "message": r.message,
+                }
+                for r in (validation_report.results if validation_report else [])
+            ],
+        },
         "heuristic_features": {
             "ela_mean": ela_mean,
             "hotspot_count": hotspot_count,
@@ -422,6 +649,8 @@ def run_full_pipeline(image_path):
         # Flattened for current Home.tsx fetch
         "authenticityScore": int(round(overall_score)),
         "isTampered": is_tampered,
+        "isDocument": is_doc_final,
+        "documentStatus": "DOCUMENT" if is_doc_final else "NOT_A_DOCUMENT",
         "ocrText": ocr_text[:800] if ocr_text else "",
         "riskLevel": riskLevel,
         "decision": decision,
